@@ -13,6 +13,8 @@ type Colour = keyof typeof PALETTE;
 type Ratios = Record<Colour, number>;
 type Block = { id: number; row: number; column: number; width: number; height: number; colour: Colour };
 type DragState = { id: number; offsetX: number; offsetY: number; row: number; column: number } | null;
+/** 將外部文字或圖片解碼為可縮放的色彩／複雜度矩陣。 */
+type MatrixProfile = { colours: Colour[]; complexity: number[]; width: number; height: number };
 
 const DEFAULT_RATIOS = Object.fromEntries(Object.entries(PALETTE).map(([key, value]) => [key, value.ratio])) as Ratios;
 const CELL = 42;
@@ -34,25 +36,57 @@ function isFree(cells: boolean[][], row: number, column: number, width: number, 
   return row >= 0 && column >= 0 && row + height <= cells.length && column + width <= cells[0].length && Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => !cells[row + y][column + x]).every(Boolean)).every(Boolean);
 }
 function occupy(cells: boolean[][], block: Omit<Block, "id" | "colour">) { for (let y = block.row; y < block.row + block.height; y += 1) for (let x = block.column; x < block.column + block.width; x += 1) cells[y][x] = true; }
-function colourAt(block: Omit<Block, "id" | "colour">, rows: number, columns: number, random: () => number, ratios: Ratios, source?: Colour[]) {
-  if (source?.length) return source[Math.min(source.length - 1, Math.floor((block.row + block.height / 2) / rows * Math.sqrt(source.length)) * Math.sqrt(source.length) + Math.floor((block.column + block.width / 2) / columns * Math.sqrt(source.length)))] ?? "White";
+function profileValue(profile: MatrixProfile, row: number, column: number, rows: number, columns: number) {
+  const x = Math.min(profile.width - 1, Math.floor(column / columns * profile.width));
+  const y = Math.min(profile.height - 1, Math.floor(row / rows * profile.height));
+  return y * profile.width + x;
+}
+function colourAt(block: Omit<Block, "id" | "colour">, rows: number, columns: number, random: () => number, ratios: Ratios, source?: MatrixProfile) {
+  if (source) return source.colours[profileValue(source, block.row + block.height / 2, block.column + block.width / 2, rows, columns)] ?? "White";
   const names = Object.keys(PALETTE) as Colour[]; let cursor = random() * 100; for (const name of names) { cursor -= ratios[name]; if (cursor <= 0) return name; } return "White";
 }
 
 /**
- * 以「約束式局部重新排版」取代全域動態規劃：拖曳物件先保留，其他矩形依面積重放；
- * 不能放入的區塊捨棄，最後用小區塊補滿空格。這能在每次放開滑鼠時立即完成。
+ * 動態規劃求取目前空白區中的最佳矩形。
+ * heights[x] 記錄「以目前列為底、向上連續空白」的高度；每次掃描只增量更新，
+ * 因此能在拖放時即時為殘缺區域找到較大的可用區塊，而非壓縮整張畫布。
  */
-function pack(rows: number, columns: number, ratios: Ratios, seed: number, source?: Colour[], preferred?: Block, existing: Block[] = []) {
+function bestEmptyRectangle(cells: boolean[][], profile?: MatrixProfile, rows = cells.length, columns = cells[0].length) {
+  const heights = Array<number>(columns).fill(0);
+  let best: Omit<Block, "id" | "colour"> | null = null;
+  let bestScore = -1;
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) heights[column] = cells[row][column] ? 0 : heights[column] + 1;
+    for (let left = 0; left < columns; left += 1) {
+      let height = Number.POSITIVE_INFINITY;
+      for (let right = left; right < Math.min(columns, left + 5); right += 1) {
+        height = Math.min(height, heights[right]);
+        if (!height) break;
+        // 影像紋理較高的位置保留小單元；平坦區域優先形成較大的色面。
+        const complexity = profile?.complexity[profileValue(profile, row, left, rows, columns)] ?? 0.5;
+        const cappedHeight = Math.min(height, complexity > 0.55 ? 2 : 5);
+        const area = (right - left + 1) * cappedHeight;
+        const score = area - Math.abs((right - left + 1) - cappedHeight) * 0.08;
+        if (score > bestScore) { bestScore = score; best = { row: row - cappedHeight + 1, column: left, width: right - left + 1, height: cappedHeight }; }
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * 先保留使用者拖曳的矩形，再安置未衝突區塊；擠不下的區塊自然捨棄。
+ * 之後以動態規劃反覆尋找最大空白矩形並補滿，形成快速且穩定的局部重排。
+ */
+function pack(rows: number, columns: number, ratios: Ratios, seed: number, source?: MatrixProfile, preferred?: Block, existing: Block[] = []) {
   const random = randomFrom(seed); const cells = Array.from({ length: rows }, () => Array<boolean>(columns).fill(false)); const output: Block[] = []; let id = 0;
   const add = (block: Omit<Block, "id" | "colour">, colour?: Colour) => { occupy(cells, block); output.push({ ...block, id: id += 1, colour: colour ?? colourAt(block, rows, columns, random, ratios, source) }); };
   if (preferred && isFree(cells, preferred.row, preferred.column, preferred.width, preferred.height)) add(preferred, preferred.colour);
   for (const block of [...existing].sort((a, b) => b.width * b.height - a.width * a.height)) if (block.id !== preferred?.id && isFree(cells, block.row, block.column, block.width, block.height)) add(block, block.colour);
-  const shapes = [[3, 3], [2, 2], [3, 1], [1, 3], [2, 1], [1, 2], [1, 1]];
-  for (let row = 0; row < rows; row += 1) for (let column = 0; column < columns; column += 1) {
-    if (cells[row][column]) continue;
-    const candidates = shapes.filter(([height, width]) => isFree(cells, row, column, width, height));
-    const [height, width] = candidates[Math.floor(random() * candidates.length)] ?? [1, 1]; add({ row, column, width, height });
+  while (true) {
+    const next = bestEmptyRectangle(cells, source, rows, columns);
+    if (!next) break;
+    add(next);
   }
   return output;
 }
@@ -64,18 +98,18 @@ function balance(current: Ratios, changed: Colour, value: number): Ratios {
 }
 
 export default function DeStijlGenerator() {
-  const [columns, setColumns] = useState(20); const [rows, setRows] = useState(30); const [lineWidth, setLineWidth] = useState(4); const [ratios, setRatios] = useState<Ratios>(DEFAULT_RATIOS); const [seed, setSeed] = useState(makeSeed); const [source, setSource] = useState<Colour[]>(); const [sourceLabel, setSourceLabel] = useState("純 Seed 生成"); const [blocks, setBlocks] = useState<Block[]>(() => pack(30, 20, DEFAULT_RATIOS, seed)); const [drag, setDrag] = useState<DragState>(null); const [text, setText] = useState("");
+  const [columns, setColumns] = useState(20); const [rows, setRows] = useState(30); const [lineWidth, setLineWidth] = useState(4); const [ratios, setRatios] = useState<Ratios>(DEFAULT_RATIOS); const [seed, setSeed] = useState(makeSeed); const [source, setSource] = useState<MatrixProfile>(); const [sourceLabel, setSourceLabel] = useState("純 Seed 生成"); const [blocks, setBlocks] = useState<Block[]>(() => pack(30, 20, DEFAULT_RATIOS, seed)); const [drag, setDrag] = useState<DragState>(null); const [text, setText] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null); const step = CELL + lineWidth; const size = useMemo(() => ({ width: columns * step + lineWidth, height: rows * step + lineWidth }), [columns, rows, lineWidth, step]);
   const regenerate = (nextSeed = makeSeed(), nextSource = source) => { setSeed(nextSeed); setBlocks(pack(rows, columns, ratios, nextSeed, nextSource)); };
   function canvasPoint(event: PointerEvent<HTMLCanvasElement>) { const canvas = canvasRef.current!; const rect = canvas.getBoundingClientRect(); return { column: Math.floor((event.clientX - rect.left) / step), row: Math.floor((event.clientY - rect.top) / step) }; }
   function pointerDown(event: PointerEvent<HTMLCanvasElement>) { const point = canvasPoint(event); const block = [...blocks].reverse().find((item) => point.row >= item.row && point.row < item.row + item.height && point.column >= item.column && point.column < item.column + item.width); if (!block) return; event.currentTarget.setPointerCapture(event.pointerId); setDrag({ id: block.id, offsetX: point.column - block.column, offsetY: point.row - block.row, row: block.row, column: block.column }); }
   function pointerMove(event: PointerEvent<HTMLCanvasElement>) { if (!drag) return; const point = canvasPoint(event); setDrag({ ...drag, row: point.row - drag.offsetY, column: point.column - drag.offsetX }); }
-  function pointerUp(event: PointerEvent<HTMLCanvasElement>) { if (!drag) return; const moving = blocks.find((block) => block.id === drag.id); const target = moving && { ...moving, row: drag.row, column: drag.column }; if (target && target.row >= 0 && target.column >= 0 && target.row + target.height <= rows && target.column + target.width <= columns) setBlocks(pack(rows, columns, ratios, seed, source, target, blocks)); setDrag(null); event.currentTarget.releasePointerCapture(event.pointerId); }
+  function pointerUp(event: PointerEvent<HTMLCanvasElement>) { if (!drag) return; const moving = blocks.find((block) => block.id === drag.id); if (moving) { const target = { ...moving, row: Math.max(0, Math.min(rows - moving.height, drag.row)), column: Math.max(0, Math.min(columns - moving.width, drag.column)) }; setBlocks(pack(rows, columns, ratios, seed, source, target, blocks)); } setDrag(null); event.currentTarget.releasePointerCapture(event.pointerId); }
   function draw() { const canvas = canvasRef.current; if (!canvas) return; canvas.width = size.width; canvas.height = size.height; const context = canvas.getContext("2d"); if (!context) return; context.fillStyle = "#191919"; context.fillRect(0, 0, size.width, size.height); const drawn = drag ? blocks.filter((block) => block.id !== drag.id) : blocks; [...drawn, ...(drag ? [{ id: drag.id, row: drag.row, column: drag.column, width: blocks.find((item) => item.id === drag.id)?.width ?? 1, height: blocks.find((item) => item.id === drag.id)?.height ?? 1, colour: blocks.find((item) => item.id === drag.id)?.colour ?? "White" } as Block] : [])].forEach((block) => { context.fillStyle = PALETTE[block.colour].hex; context.fillRect(lineWidth + block.column * step, lineWidth + block.row * step, block.width * CELL + (block.width - 1) * lineWidth, block.height * CELL + (block.height - 1) * lineWidth); }); }
   useEffect(draw, [blocks, drag, size, lineWidth, step]);
   function exportPng() { const canvas = canvasRef.current; if (!canvas) return; const link = document.createElement("a"); link.download = `destijl-${seed}.png`; link.href = canvas.toDataURL("image/png"); link.click(); }
-  function encodeText() { if (!text.trim()) return; const nextSeed = hash(text); const map = Array.from({ length: 400 }, (_, index) => (Object.keys(PALETTE) as Colour[])[(text.charCodeAt(index % text.length) + index) % 5]); setSource(map); setSourceLabel("文字矩陣"); regenerate(nextSeed, map); }
-  function uploadImage(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const image = new Image(); image.onload = () => { const temp = document.createElement("canvas"); temp.width = temp.height = 20; const context = temp.getContext("2d")!; context.drawImage(image, 0, 0, 20, 20); const pixels = context.getImageData(0, 0, 20, 20).data; const map = Array.from({ length: 400 }, (_, index) => nearestColour(pixels[index * 4], pixels[index * 4 + 1], pixels[index * 4 + 2])); setSource(map); setSourceLabel(`圖片矩陣 · ${file.name}`); regenerate(hash(`${file.name}${file.size}`), map); URL.revokeObjectURL(image.src); }; image.src = URL.createObjectURL(file); }
+  function encodeText() { if (!text.trim()) return; const nextSeed = hash(text); const map = Array.from({ length: rows * columns }, (_, index) => { const code = text.charCodeAt(index % text.length); return (Object.keys(PALETTE) as Colour[])[(code + index * 17) % 5]; }); const profile = { colours: map, complexity: map.map((_, index) => (text.charCodeAt(index % text.length) % 100) / 100), width: columns, height: rows }; setSource(profile); setSourceLabel("文字矩陣"); regenerate(nextSeed, profile); }
+  function uploadImage(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const image = new Image(); image.onload = () => { const temp = document.createElement("canvas"); temp.width = columns; temp.height = rows; const context = temp.getContext("2d")!; context.drawImage(image, 0, 0, columns, rows); const pixels = context.getImageData(0, 0, columns, rows).data; const luminance = (index: number) => .2126 * pixels[index * 4] + .7152 * pixels[index * 4 + 1] + .0722 * pixels[index * 4 + 2]; const profile = { colours: Array.from({ length: rows * columns }, (_, index) => nearestColour(pixels[index * 4], pixels[index * 4 + 1], pixels[index * 4 + 2])), complexity: Array.from({ length: rows * columns }, (_, index) => { const x = index % columns; const y = Math.floor(index / columns); const neighbours = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].filter(([nx, ny]) => nx >= 0 && ny >= 0 && nx < columns && ny < rows).map(([nx, ny]) => luminance(ny * columns + nx)); return neighbours.length ? Math.min(1, neighbours.reduce((sum, value) => sum + Math.abs(value - luminance(index)), 0) / neighbours.length / 64) : 0; }), width: columns, height: rows }; setSource(profile); setSourceLabel(`圖片矩陣 · ${file.name}`); regenerate(hash(`${file.name}${file.size}`), profile); URL.revokeObjectURL(image.src); }; image.src = URL.createObjectURL(file); }
   function changeColumns(value: number) { setColumns(value); setBlocks(pack(rows, value, ratios, seed, source)); }
   function changeRows(value: number) { setRows(value); setBlocks(pack(value, columns, ratios, seed, source)); }
   function changeRatio(name: Colour, value: number) { const next = balance(ratios, name, value); setRatios(next); setBlocks(pack(rows, columns, next, seed, source)); }
