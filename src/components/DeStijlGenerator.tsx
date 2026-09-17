@@ -1,123 +1,83 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 
-/** 德．史提爾常用的原色與預設面積比例。 */
-const COLOURS = {
-  White: { label: "留白", hex: "#F6F4EF", ratio: 50 },
-  Red: { label: "紅", hex: "#D51E2F", ratio: 20 },
-  Blue: { label: "藍", hex: "#164B9A", ratio: 15 },
-  Yellow: { label: "黃", hex: "#F2C230", ratio: 10 },
+const PALETTE = {
+  White: { label: "留白", hex: "#F7F7F5", ratio: 50 },
+  Red: { label: "紅", hex: "#E31B32", ratio: 20 },
+  Blue: { label: "藍", hex: "#0759B8", ratio: 15 },
+  Yellow: { label: "黃", hex: "#FFD028", ratio: 10 },
   Black: { label: "黑", hex: "#171717", ratio: 5 },
 } as const;
+type Colour = keyof typeof PALETTE;
+type Ratios = Record<Colour, number>;
+type Block = { id: number; row: number; column: number; width: number; height: number; colour: Colour };
+type DragState = { id: number; offsetX: number; offsetY: number; row: number; column: number } | null;
 
-type ColourName = keyof typeof COLOURS;
-type Ratios = Record<ColourName, number>;
-type Block = { row: number; column: number; width: number; height: number; colour: ColourName };
-const DEFAULT_RATIOS = Object.fromEntries(Object.entries(COLOURS).map(([name, colour]) => [name, colour.ratio])) as Ratios;
+const DEFAULT_RATIOS = Object.fromEntries(Object.entries(PALETTE).map(([key, value]) => [key, value.ratio])) as Ratios;
+const CELL = 42;
 
-/** 將整數 seed 轉成可重現的亂數函式，讓喜歡的作品可以再次生成。 */
-function createRandom(seed: number) {
+/** 可重現亂數：相同 seed 與設定必定產生相同的構圖。 */
+function randomFrom(seed: number) {
   let value = seed >>> 0;
-  return () => {
-    value += 0x6d2b79f5;
-    let result = value;
-    result = Math.imul(result ^ (result >>> 15), result | 1);
-    result ^= result + Math.imul(result ^ (result >>> 7), result | 61);
-    return ((result ^ (result >>> 14)) >>> 0) / 4294967296;
-  };
+  return () => { value += 0x6d2b79f5; let result = value; result = Math.imul(result ^ (result >>> 15), result | 1); result ^= result + Math.imul(result ^ (result >>> 7), result | 61); return ((result ^ (result >>> 14)) >>> 0) / 4294967296; };
 }
-const randomSeed = () => Math.floor(Math.random() * 999_999) + 1;
+const makeSeed = () => Math.floor(Math.random() * 999_999) + 1;
+const hash = (value: string) => [...value].reduce((sum, character) => ((sum << 5) - sum + character.charCodeAt(0)) | 0, 2166136261) >>> 0;
+const nearestColour = (r: number, g: number, b: number): Colour => (Object.keys(PALETTE) as Colour[]).reduce((best, name) => {
+  const hex = PALETTE[name].hex; const pr = parseInt(hex.slice(1, 3), 16); const pg = parseInt(hex.slice(3, 5), 16); const pb = parseInt(hex.slice(5, 7), 16);
+  const current = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2; const old = PALETTE[best].hex; const br = parseInt(old.slice(1, 3), 16); const bg = parseInt(old.slice(3, 5), 16); const bb = parseInt(old.slice(5, 7), 16);
+  return current < (r - br) ** 2 + (g - bg) ** 2 + (b - bb) ** 2 ? name : best;
+}, "White");
 
-/** 保持五種色彩比例精準加總為 100，免除手動修正配額。 */
-function balanceRatios(current: Ratios, changed: ColourName, nextValue: number): Ratios {
-  const result = { ...current, [changed]: nextValue };
-  const others = (Object.keys(result) as ColourName[]).filter((name) => name !== changed);
-  const previousTotal = others.reduce((sum, name) => sum + current[name], 0);
-  const available = 100 - nextValue;
-  others.forEach((name) => { result[name] = previousTotal ? Math.round((available * current[name]) / previousTotal) : Math.floor(available / others.length); });
-  const difference = 100 - (Object.values(result) as number[]).reduce((sum, value) => sum + value, 0);
-  const target = others.reduce((largest, name) => result[name] > result[largest] ? name : largest, others[0]);
-  result[target] += difference;
-  return result;
+function isFree(cells: boolean[][], row: number, column: number, width: number, height: number) {
+  return row >= 0 && column >= 0 && row + height <= cells.length && column + width <= cells[0].length && Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => !cells[row + y][column + x]).every(Boolean)).every(Boolean);
+}
+function occupy(cells: boolean[][], block: Omit<Block, "id" | "colour">) { for (let y = block.row; y < block.row + block.height; y += 1) for (let x = block.column; x < block.column + block.width; x += 1) cells[y][x] = true; }
+function colourAt(block: Omit<Block, "id" | "colour">, rows: number, columns: number, random: () => number, ratios: Ratios, source?: Colour[]) {
+  if (source?.length) return source[Math.min(source.length - 1, Math.floor((block.row + block.height / 2) / rows * Math.sqrt(source.length)) * Math.sqrt(source.length) + Math.floor((block.column + block.width / 2) / columns * Math.sqrt(source.length)))] ?? "White";
+  const names = Object.keys(PALETTE) as Colour[]; let cursor = random() * 100; for (const name of names) { cursor -= ratios[name]; if (cursor <= 0) return name; } return "White";
 }
 
-function fits(cells: boolean[][], row: number, column: number, width: number, height: number) {
-  return Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => !cells[row + y][column + x]).every(Boolean)).every(Boolean);
-}
-function occupy(cells: boolean[][], row: number, column: number, width: number, height: number) {
-  for (let y = row; y < row + height; y += 1) for (let x = column; x < column + width; x += 1) cells[y][x] = true;
-}
-function touches(left: Omit<Block, "colour">, right: Omit<Block, "colour">) {
-  const horizontal = (left.column + left.width === right.column || right.column + right.width === left.column) && Math.max(left.row, right.row) < Math.min(left.row + left.height, right.row + right.height);
-  const vertical = (left.row + left.height === right.row || right.row + right.height === left.row) && Math.max(left.column, right.column) < Math.min(left.column + left.width, right.column + right.width);
-  return horizontal || vertical;
-}
-
-/** 先安排大區塊，再以方向性長條填補；最後用配額與相鄰排斥規則分色。 */
-function generateComposition(rows: number, columns: number, ratios: Ratios, seed: number): Block[] {
-  const random = createRandom(seed);
-  const cells = Array.from({ length: rows }, () => Array<boolean>(columns).fill(false));
-  const blocks: Omit<Block, "colour">[] = [];
-  const shapes = [[3, 3], [2, 2], [1, 3], [3, 1], [1, 2], [2, 1], [1, 1]];
-  for (const [height, width] of shapes) {
-    for (let attempt = 0; attempt < Math.max(4, Math.round(rows * columns / (width * height * 2))); attempt += 1) {
-      if (height > rows || width > columns) continue;
-      const row = Math.floor(random() * (rows - height + 1));
-      const column = Math.floor(random() * (columns - width + 1));
-      if (!fits(cells, row, column, width, height)) continue;
-      occupy(cells, row, column, width, height); blocks.push({ row, column, width, height });
-    }
-  }
-  // 補足所有空格，畫面才會是完整的視覺系統。
+/**
+ * 以「約束式局部重新排版」取代全域動態規劃：拖曳物件先保留，其他矩形依面積重放；
+ * 不能放入的區塊捨棄，最後用小區塊補滿空格。這能在每次放開滑鼠時立即完成。
+ */
+function pack(rows: number, columns: number, ratios: Ratios, seed: number, source?: Colour[], preferred?: Block, existing: Block[] = []) {
+  const random = randomFrom(seed); const cells = Array.from({ length: rows }, () => Array<boolean>(columns).fill(false)); const output: Block[] = []; let id = 0;
+  const add = (block: Omit<Block, "id" | "colour">, colour?: Colour) => { occupy(cells, block); output.push({ ...block, id: id += 1, colour: colour ?? colourAt(block, rows, columns, random, ratios, source) }); };
+  if (preferred && isFree(cells, preferred.row, preferred.column, preferred.width, preferred.height)) add(preferred, preferred.colour);
+  for (const block of [...existing].sort((a, b) => b.width * b.height - a.width * a.height)) if (block.id !== preferred?.id && isFree(cells, block.row, block.column, block.width, block.height)) add(block, block.colour);
+  const shapes = [[3, 3], [2, 2], [3, 1], [1, 3], [2, 1], [1, 2], [1, 1]];
   for (let row = 0; row < rows; row += 1) for (let column = 0; column < columns; column += 1) {
     if (cells[row][column]) continue;
-    let width = 1; let height = 1;
-    while (column + width < columns && !cells[row][column + width]) width += 1;
-    while (row + height < rows && !cells[row + height][column]) height += 1;
-    if (height > width) width = 1; else height = 1;
-    occupy(cells, row, column, width, height); blocks.push({ row, column, width, height });
+    const candidates = shapes.filter(([height, width]) => isFree(cells, row, column, width, height));
+    const [height, width] = candidates[Math.floor(random() * candidates.length)] ?? [1, 1]; add({ row, column, width, height });
   }
-  const total = rows * columns;
-  const quotas = Object.fromEntries((Object.keys(ratios) as ColourName[]).map((name) => [name, Math.round(total * ratios[name] / 100)])) as Ratios;
-  const largest = (Object.keys(quotas) as ColourName[]).reduce((best, name) => quotas[name] > quotas[best] ? name : best);
-  quotas[largest] += total - (Object.values(quotas) as number[]).reduce((sum, value) => sum + value, 0);
-  const painted: Block[] = [];
-  for (const block of [...blocks].sort((a, b) => b.width * b.height - a.width * a.height)) {
-    const adjacent = new Set(painted.filter((other) => touches(block, other)).map((other) => other.colour));
-    const area = block.width * block.height;
-    const names = Object.keys(COLOURS) as ColourName[];
-    let candidates = names.filter((name) => quotas[name] >= area && (name === "White" || !adjacent.has(name)));
-    if (!candidates.length) candidates = names.filter((name) => !adjacent.has(name));
-    if (!candidates.length) candidates = names;
-    let cursor = random() * candidates.reduce((sum, name) => sum + Math.max(1, quotas[name]), 0);
-    const colour = candidates.find((name) => (cursor -= Math.max(1, quotas[name])) <= 0) ?? candidates[0];
-    quotas[colour] -= area; painted.push({ ...block, colour });
-  }
-  return painted;
+  return output;
 }
 
-function RangeControl({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
-  return <label className="control"><span><span>{label}</span><output>{value}</output></span><input type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
+function balance(current: Ratios, changed: Colour, value: number): Ratios {
+  const next = { ...current, [changed]: value }; const others = (Object.keys(next) as Colour[]).filter((name) => name !== changed); const previous = others.reduce((sum, name) => sum + current[name], 0); const available = 100 - value;
+  others.forEach((name) => { next[name] = previous ? Math.round(available * current[name] / previous) : Math.floor(available / others.length); });
+  next[others[0]] += 100 - (Object.values(next) as number[]).reduce((sum, item) => sum + item, 0); return next;
 }
 
 export default function DeStijlGenerator() {
-  const [columns, setColumns] = useState(10); const [rows, setRows] = useState(10); const [lineWidth, setLineWidth] = useState(8);
-  const [ratios, setRatios] = useState<Ratios>(DEFAULT_RATIOS); const [seed, setSeed] = useState(randomSeed);
-  const canvasRef = useRef<HTMLCanvasElement>(null); const previewRef = useRef<HTMLDivElement>(null);
-  const composition = useMemo(() => generateComposition(rows, columns, ratios, seed), [columns, ratios, rows, seed]);
-  const drawCanvas = useCallback((resolution: number) => {
-    const canvas = canvasRef.current; if (!canvas) return null;
-    const side = Math.max(240, resolution); const line = Math.max(2, Math.round(lineWidth * side / 100)); const cell = (side - line * (columns + 1)) / columns;
-    canvas.width = side; canvas.height = side;
-    const context = canvas.getContext("2d"); if (!context) return null;
-    context.fillStyle = "#171717"; context.fillRect(0, 0, side, side);
-    composition.forEach((block) => { const x = line + block.column * (cell + line); const y = line + block.row * (cell + line); context.fillStyle = COLOURS[block.colour].hex; context.fillRect(x, y, block.width * cell + (block.width - 1) * line, block.height * cell + (block.height - 1) * line); });
-    return canvas;
-  }, [columns, composition, lineWidth]);
-  useEffect(() => { const preview = previewRef.current; if (!preview) return; const resize = () => drawCanvas(Math.min(preview.clientWidth - 32, preview.clientHeight - 32)); resize(); const observer = new ResizeObserver(resize); observer.observe(preview); return () => observer.disconnect(); }, [drawCanvas]);
-  const regenerate = () => setSeed(randomSeed());
-  const reset = () => { setColumns(10); setRows(10); setLineWidth(8); setRatios(DEFAULT_RATIOS); regenerate(); };
-  function downloadPng() { const canvas = drawCanvas(1800); if (!canvas) return; const link = document.createElement("a"); link.download = `destijl-${seed.toString().padStart(6, "0")}.png`; link.href = canvas.toDataURL("image/png"); link.click(); if (previewRef.current) drawCanvas(Math.min(previewRef.current.clientWidth - 32, previewRef.current.clientHeight - 32)); }
-  return <main className="studio-shell"><aside className="sidebar"><header className="brand"><p>GENERATIVE STUDY · 01</p><h1>De Stijl<br /><em>Studio</em></h1><span>參數化構圖實驗室</span></header><section><h2>畫布結構</h2><RangeControl label="欄數 Columns" value={columns} min={5} max={24} onChange={setColumns} /><RangeControl label="列數 Rows" value={rows} min={5} max={24} onChange={setRows} /><RangeControl label="線條粗細" value={lineWidth} min={2} max={16} onChange={setLineWidth} /></section><section><div className="section-heading"><h2>色彩比例</h2><span>100%</span></div>{(Object.keys(COLOURS) as ColourName[]).map((name) => <label className="colour-control" key={name}><span><i style={{ backgroundColor: COLOURS[name].hex }} />{COLOURS[name].label}<output>{ratios[name]}%</output></span><input type="range" min="0" max="100" value={ratios[name]} onChange={(event) => setRatios(balanceRatios(ratios, name, Number(event.target.value)))} /></label>)}</section><div className="actions"><button className="primary" onClick={regenerate}>產生新構圖 <span>↗</span></button><button className="secondary" onClick={downloadPng}>匯出 1800px PNG</button><button className="text-button" onClick={reset}>重設所有參數</button></div></aside><section className="workspace"><div className="workspace-header"><div><p>DE STIJL / DIGITAL COMPOSITION</p><h2>將秩序化為可操作的視覺語言</h2></div><div className="seed"><span>REPRODUCIBLE SEED</span><strong>{seed.toString().padStart(6, "0")}</strong></div></div><div className="preview" ref={previewRef}><canvas ref={canvasRef} aria-label="風格派生成作品預覽" /></div><footer><span>以色彩配額、格線與可重現亂數，探索偶然中的秩序。</span><span>© 2026 KENT CHEN</span></footer></section></main>;
+  const [columns, setColumns] = useState(20); const [rows, setRows] = useState(30); const [lineWidth, setLineWidth] = useState(4); const [ratios, setRatios] = useState<Ratios>(DEFAULT_RATIOS); const [seed, setSeed] = useState(makeSeed); const [source, setSource] = useState<Colour[]>(); const [sourceLabel, setSourceLabel] = useState("純 Seed 生成"); const [blocks, setBlocks] = useState<Block[]>(() => pack(30, 20, DEFAULT_RATIOS, seed)); const [drag, setDrag] = useState<DragState>(null); const [text, setText] = useState("");
+  const canvasRef = useRef<HTMLCanvasElement>(null); const step = CELL + lineWidth; const size = useMemo(() => ({ width: columns * step + lineWidth, height: rows * step + lineWidth }), [columns, rows, lineWidth, step]);
+  const regenerate = (nextSeed = makeSeed(), nextSource = source) => { setSeed(nextSeed); setBlocks(pack(rows, columns, ratios, nextSeed, nextSource)); };
+  function canvasPoint(event: PointerEvent<HTMLCanvasElement>) { const canvas = canvasRef.current!; const rect = canvas.getBoundingClientRect(); return { column: Math.floor((event.clientX - rect.left) / step), row: Math.floor((event.clientY - rect.top) / step) }; }
+  function pointerDown(event: PointerEvent<HTMLCanvasElement>) { const point = canvasPoint(event); const block = [...blocks].reverse().find((item) => point.row >= item.row && point.row < item.row + item.height && point.column >= item.column && point.column < item.column + item.width); if (!block) return; event.currentTarget.setPointerCapture(event.pointerId); setDrag({ id: block.id, offsetX: point.column - block.column, offsetY: point.row - block.row, row: block.row, column: block.column }); }
+  function pointerMove(event: PointerEvent<HTMLCanvasElement>) { if (!drag) return; const point = canvasPoint(event); setDrag({ ...drag, row: point.row - drag.offsetY, column: point.column - drag.offsetX }); }
+  function pointerUp(event: PointerEvent<HTMLCanvasElement>) { if (!drag) return; const moving = blocks.find((block) => block.id === drag.id); const target = moving && { ...moving, row: drag.row, column: drag.column }; if (target && target.row >= 0 && target.column >= 0 && target.row + target.height <= rows && target.column + target.width <= columns) setBlocks(pack(rows, columns, ratios, seed, source, target, blocks)); setDrag(null); event.currentTarget.releasePointerCapture(event.pointerId); }
+  function draw() { const canvas = canvasRef.current; if (!canvas) return; canvas.width = size.width; canvas.height = size.height; const context = canvas.getContext("2d"); if (!context) return; context.fillStyle = "#191919"; context.fillRect(0, 0, size.width, size.height); const drawn = drag ? blocks.filter((block) => block.id !== drag.id) : blocks; [...drawn, ...(drag ? [{ id: drag.id, row: drag.row, column: drag.column, width: blocks.find((item) => item.id === drag.id)?.width ?? 1, height: blocks.find((item) => item.id === drag.id)?.height ?? 1, colour: blocks.find((item) => item.id === drag.id)?.colour ?? "White" } as Block] : [])].forEach((block) => { context.fillStyle = PALETTE[block.colour].hex; context.fillRect(lineWidth + block.column * step, lineWidth + block.row * step, block.width * CELL + (block.width - 1) * lineWidth, block.height * CELL + (block.height - 1) * lineWidth); }); }
+  useEffect(draw, [blocks, drag, size, lineWidth, step]);
+  function exportPng() { const canvas = canvasRef.current; if (!canvas) return; const link = document.createElement("a"); link.download = `destijl-${seed}.png`; link.href = canvas.toDataURL("image/png"); link.click(); }
+  function encodeText() { if (!text.trim()) return; const nextSeed = hash(text); const map = Array.from({ length: 400 }, (_, index) => (Object.keys(PALETTE) as Colour[])[(text.charCodeAt(index % text.length) + index) % 5]); setSource(map); setSourceLabel("文字矩陣"); regenerate(nextSeed, map); }
+  function uploadImage(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const image = new Image(); image.onload = () => { const temp = document.createElement("canvas"); temp.width = temp.height = 20; const context = temp.getContext("2d")!; context.drawImage(image, 0, 0, 20, 20); const pixels = context.getImageData(0, 0, 20, 20).data; const map = Array.from({ length: 400 }, (_, index) => nearestColour(pixels[index * 4], pixels[index * 4 + 1], pixels[index * 4 + 2])); setSource(map); setSourceLabel(`圖片矩陣 · ${file.name}`); regenerate(hash(`${file.name}${file.size}`), map); URL.revokeObjectURL(image.src); }; image.src = URL.createObjectURL(file); }
+  function changeColumns(value: number) { setColumns(value); setBlocks(pack(rows, value, ratios, seed, source)); }
+  function changeRows(value: number) { setRows(value); setBlocks(pack(value, columns, ratios, seed, source)); }
+  function changeRatio(name: Colour, value: number) { const next = balance(ratios, name, value); setRatios(next); setBlocks(pack(rows, columns, next, seed, source)); }
+  return <main className="editor"><div className="canvas-scroll"><canvas ref={canvasRef} className="artboard" style={{ width: size.width, height: size.height }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => setDrag(null)} /></div><aside className="inspector"><div className="titlebar"><span className="window-dot red" /><span className="window-dot yellow" /><span className="window-dot green" /><strong>De Stijl Studio</strong></div><p className="eyebrow">CANVAS · {columns} × {rows} · {sourceLabel}</p><section><h1>構圖控制</h1><label>欄數 <output>{columns}</output><input type="range" min="5" max="50" value={columns} onChange={(event) => changeColumns(Number(event.target.value))} /></label><label>列數 <output>{rows}</output><input type="range" min="5" max="50" value={rows} onChange={(event) => changeRows(Number(event.target.value))} /></label><label>格線 <output>{lineWidth}px</output><input type="range" min="2" max="12" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} /></label></section><section><h2>色彩配額 <span>100%</span></h2>{(Object.keys(PALETTE) as Colour[]).map((name) => <label className="colour" key={name}><i style={{ background: PALETTE[name].hex }} />{PALETTE[name].label}<output>{ratios[name]}%</output><input type="range" min="0" max="100" value={ratios[name]} onChange={(event) => changeRatio(name, Number(event.target.value))} /></label>)}</section><section className="source"><h2>編碼輸入</h2><textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="輸入一段文字，轉為色彩矩陣…" /><button onClick={encodeText}>轉譯文字矩陣</button><label className="upload">上傳圖片並取樣<input type="file" accept="image/*" onChange={uploadImage} /></label></section><div className="actions"><button className="secondary" onClick={() => { setSource(undefined); setSourceLabel("純 Seed 生成"); regenerate(); }}>重新生成</button><button className="primary" onClick={exportPng}>匯出 PNG</button></div><p className="hint">拖曳任一色塊即可重新排版；衝突區塊會被移除，缺口即時補滿。</p></aside></main>;
 }
