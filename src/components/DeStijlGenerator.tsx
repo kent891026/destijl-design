@@ -19,7 +19,7 @@ type MatrixProfile = { colours: Colour[]; complexity: number[]; width: number; h
 type Metrics = { width: number; height: number; cell: number; line: number };
 
 const DEFAULT_COLOUR_RATIOS = Object.fromEntries(Object.entries(PALETTE).map(([key, value]) => [key, value.ratio])) as Ratios;
-const DEFAULT_SIZE_RATIOS: SizeRatios = { 1: 18, 2: 28, 3: 26, 4: 18, 5: 10 };
+const DEFAULT_SIZE_RATIOS: SizeRatios = { 1: 3, 2: 8, 3: 14, 4: 18, 5: 18, 6: 16, 7: 13, 8: 10 };
 
 /** 相同 seed、比例與矩陣尺寸會產生同一組構圖。 */
 function randomFrom(seed: number) {
@@ -155,6 +155,22 @@ function buildLayout(rows: number, columns: number, colourRatios: Ratios, sizeRa
   };
   // 原有未碰撞區塊先回到原位，確保拖曳只改變路徑附近的畫面。
   existing.forEach((block) => { if (isFree(cells, block.row, block.column, block.width, block.height)) add(block, block.colour, block.id); });
+  /**
+   * 純生成時先散布錯位的錨點矩形，而非由左上角一路切到底。
+   * 這會製造風格派常見的 T 字交界與不對稱節奏；拖曳重排則跳過此階段，
+   * 讓原有構圖盡可能被保留。
+   */
+  if (!existing.length) {
+    const anchorTarget = Math.max(8, Math.round(rows * columns / (maxTier * maxTier) * .35));
+    let placed = 0;
+    for (let attempt = 0; attempt < anchorTarget * 14 && placed < anchorTarget; attempt += 1) {
+      const tier = chooseTier(sizeQuota, random); const shortSide = 1 + Math.floor(random() * tier);
+      const vertical = random() > .5; const width = vertical ? shortSide : tier; const height = vertical ? tier : shortSide;
+      const row = Math.floor(random() * (rows - height + 1)); const column = Math.floor(random() * (columns - width + 1));
+      if (!isFree(cells, row, column, width, height)) continue;
+      add({ row, column, width, height }); placed += 1;
+    }
+  }
   while (true) {
     const space = bestEmptyRectangle(cells, maxTier, profile, rows, columns); if (!space) break;
     const shape = cropToTier(space, chooseTier(sizeQuota, random), random); add(shape);
@@ -179,10 +195,10 @@ function exchangeAlongPath(blocks: Block[], moving: Block, target: Block, rows: 
 }
 
 export default function DeStijlGenerator() {
-  const [columns, setColumns] = useState(50); const [rows, setRows] = useState(50); const [lineWidth, setLineWidth] = useState(3); const [maxTier, setMaxTier] = useState(5);
+  const [columns, setColumns] = useState(50); const [rows, setRows] = useState(50); const [lineWidth, setLineWidth] = useState(3); const [maxTier, setMaxTier] = useState(8);
   const [colourRatios, setColourRatios] = useState<Ratios>(DEFAULT_COLOUR_RATIOS); const [sizeRatios, setSizeRatios] = useState<SizeRatios>(DEFAULT_SIZE_RATIOS); const [seed, setSeed] = useState(makeSeed);
   const [profile, setProfile] = useState<MatrixProfile>(); const [sourceLabel, setSourceLabel] = useState("純 Seed 生成"); const [text, setText] = useState(""); const [drag, setDrag] = useState<DragState>(null); const [boundarySide, setBoundarySide] = useState(320);
-  const [blocks, setBlocks] = useState<Block[]>(() => buildLayout(50, 50, DEFAULT_COLOUR_RATIOS, DEFAULT_SIZE_RATIOS, 5, seed));
+  const [blocks, setBlocks] = useState<Block[]>(() => buildLayout(50, 50, DEFAULT_COLOUR_RATIOS, DEFAULT_SIZE_RATIOS, 8, seed));
   const canvasRef = useRef<HTMLCanvasElement>(null); const boundaryRef = useRef<HTMLDivElement>(null);
   const metrics = useMemo<Metrics>(() => { const unit = boundarySide / Math.max(rows, columns); const line = Math.min(lineWidth, Math.max(1, unit * .18)); return { width: columns * unit, height: rows * unit, cell: unit - line, line }; }, [boundarySide, columns, lineWidth, rows]);
   const rebuild = useCallback((nextSeed = makeSeed(), nextProfile = profile, nextRows = rows, nextColumns = columns, nextColours = colourRatios, nextSizes = sizeRatios, nextMaxTier = maxTier) => { setSeed(nextSeed); setBlocks(buildLayout(nextRows, nextColumns, nextColours, nextSizes, nextMaxTier, nextSeed, nextProfile)); }, [colourRatios, maxTier, profile, rows, columns, sizeRatios]);
