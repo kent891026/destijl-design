@@ -3,6 +3,12 @@
 > 一個以「有限矩陣邊界」為核心的生成式構圖與互動式配置工具，用於探索 **WORBY 造型牆面整理系統** 的排列組合；支援種子、文字與圖片輸入、拖曳重排、色彩最佳化，以及桌面與直式手機介面。
 
 <p align="center">
+  <img src="public/images/destijl-studio-composition.jpg" alt="De Stijl Studio 生成式矩陣構圖示例：以紅、黃、藍、白色模組在黑色邊界中排列" width="760" />
+</p>
+
+<p align="center"><em>主題構圖示例：在固定矩陣邊界中，以不規則尺寸區塊探索紅、黃、藍、白的牆面排列節奏。</em></p>
+
+<p align="center">
   <a href="https://github.com/kent891026/destijl-design">原始碼</a>
   ·
   <a href="https://makerworld.com/models/2659800?appSharePlatform=copy">WORBY 原始列印作品</a>
