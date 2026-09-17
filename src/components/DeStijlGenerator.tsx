@@ -101,6 +101,47 @@ function cropToTier(space: Omit<Block, "id" | "colour">, tier: number, random: (
   return { ...space, width, height };
 }
 
+/** 將矩形共享的邊轉為圖結構；權重是兩塊相鄰邊的長度。 */
+function buildAdjacency(blocks: Block[], rows: number, columns: number) {
+  const owners = Array.from({ length: rows }, () => Array<number>(columns).fill(-1));
+  blocks.forEach((block, index) => { for (let row = block.row; row < block.row + block.height; row += 1) for (let column = block.column; column < block.column + block.width; column += 1) owners[row][column] = index; });
+  const graph = Array.from({ length: blocks.length }, () => new Map<number, number>());
+  const connect = (left: number, right: number) => { if (left === right || left < 0 || right < 0) return; graph[left].set(right, (graph[left].get(right) ?? 0) + 1); graph[right].set(left, (graph[right].get(left) ?? 0) + 1); };
+  for (let row = 0; row < rows; row += 1) for (let column = 0; column < columns; column += 1) { if (column + 1 < columns) connect(owners[row][column], owners[row][column + 1]); if (row + 1 < rows) connect(owners[row][column], owners[row + 1][column]); }
+  return graph;
+}
+
+/**
+ * 配額約束圖著色 + 模擬退火隨機漫步。
+ * 每次隨機嘗試一個換色提案；相鄰同色受到最高懲罰，配額誤差與來源矩陣偏好次之。
+ * 退火前期允許少量非最佳變化以跳出局部解，後期逐漸收斂為色彩分散的構圖。
+ */
+function optimiseColours(blocks: Block[], rows: number, columns: number, ratios: Ratios, seed: number, profile?: MatrixProfile, lockedIds = new Set<number>()) {
+  const random = randomFrom(seed ^ 0x9e3779b9); const graph = buildAdjacency(blocks, rows, columns); const totalArea = rows * columns;
+  const target = Object.fromEntries((Object.keys(PALETTE) as Colour[]).map((name) => [name, totalArea * ratios[name] / 100])) as Ratios;
+  const used = Object.fromEntries((Object.keys(PALETTE) as Colour[]).map((name) => [name, 0])) as Ratios;
+  blocks.forEach((block) => { used[block.colour] += block.width * block.height; });
+  const unlocked = blocks.map((_, index) => index).filter((index) => !lockedIds.has(blocks[index].id));
+  const energy = (index: number, candidate: Colour) => {
+    const block = blocks[index]; const area = block.width * block.height; const original = block.colour;
+    const sameColourEdges = [...graph[index]].reduce((sum, [neighbour, edge]) => sum + (blocks[neighbour].colour === candidate ? edge : 0), 0);
+    const colourPenalty = sameColourEdges * 90;
+    if (candidate === original) return colourPenalty;
+    const currentQuota = Math.abs(used[original] - target[original]) + Math.abs(used[candidate] - target[candidate]);
+    const nextQuota = Math.abs(used[original] - area - target[original]) + Math.abs(used[candidate] + area - target[candidate]);
+    const preferred = profile?.colours[profileIndex(profile, block.row + block.height / 2, block.column + block.width / 2, rows, columns)];
+    return colourPenalty + (nextQuota - currentQuota) * .55 + (preferred && candidate !== preferred ? 6 : 0);
+  };
+  const iterations = Math.min(30_000, Math.max(800, unlocked.length * 30));
+  for (let step = 0; step < iterations; step += 1) {
+    const index = unlocked[Math.floor(random() * unlocked.length)]; if (index === undefined) break;
+    const block = blocks[index]; const names = (Object.keys(PALETTE) as Colour[]).filter((name) => name !== block.colour); const candidate = names[Math.floor(random() * names.length)];
+    const before = energy(index, block.colour); const after = energy(index, candidate); const temperature = 10 * (1 - step / iterations) + .18;
+    if (after <= before || random() < Math.exp((before - after) / temperature)) { const area = block.width * block.height; used[block.colour] -= area; used[candidate] += area; block.colour = candidate; }
+  }
+  return blocks;
+}
+
 /** 依色彩與階數配額填滿空間；已存在的區塊會被保留，不會被隨機重做。 */
 function buildLayout(rows: number, columns: number, colourRatios: Ratios, sizeRatios: SizeRatios, maxTier: number, seed: number, profile?: MatrixProfile, existing: Block[] = []) {
   const random = randomFrom(seed); const cells = Array.from({ length: rows }, () => Array<boolean>(columns).fill(false)); const output: Block[] = []; let nextId = Math.max(0, ...existing.map((block) => block.id));
@@ -118,7 +159,7 @@ function buildLayout(rows: number, columns: number, colourRatios: Ratios, sizeRa
     const space = bestEmptyRectangle(cells, maxTier, profile, rows, columns); if (!space) break;
     const shape = cropToTier(space, chooseTier(sizeQuota, random), random); add(shape);
   }
-  return output;
+  return optimiseColours(output, rows, columns, colourRatios, seed, profile, new Set(existing.map((block) => block.id)));
 }
 
 /** 將被拖曳目標擠出的舊區塊優先安置到來源位置及其移動路徑附近，再補洞。 */
@@ -158,5 +199,5 @@ export default function DeStijlGenerator() {
   function uploadImage(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const image = new Image(); image.onload = () => { const sample = document.createElement("canvas"); sample.width = columns; sample.height = rows; const context = sample.getContext("2d"); if (!context) return; context.drawImage(image, 0, 0, columns, rows); const pixels = context.getImageData(0, 0, columns, rows).data; const brightness = (index: number) => .2126 * pixels[index * 4] + .7152 * pixels[index * 4 + 1] + .0722 * pixels[index * 4 + 2]; const nextProfile = { colours: Array.from({ length: rows * columns }, (_, index) => nearestColour(pixels[index * 4], pixels[index * 4 + 1], pixels[index * 4 + 2])), complexity: Array.from({ length: rows * columns }, (_, index) => { const x = index % columns; const y = Math.floor(index / columns); const nearby = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].filter(([nx, ny]) => nx >= 0 && ny >= 0 && nx < columns && ny < rows).map(([nx, ny]) => brightness(ny * columns + nx)); return nearby.length ? Math.min(1, nearby.reduce((sum, value) => sum + Math.abs(value - brightness(index)), 0) / nearby.length / 64) : 0; }), width: columns, height: rows }; setProfile(nextProfile); setSourceLabel(`圖片矩陣 · ${file.name}`); rebuild(hash(`${file.name}${file.size}`), nextProfile); URL.revokeObjectURL(image.src); }; image.src = URL.createObjectURL(file); }
   function changeRows(value: number) { setRows(value); rebuild(seed, profile, value, columns); }
   function changeColumns(value: number) { setColumns(value); rebuild(seed, profile, rows, value); }
-  return <main className="editor"><section className="canvas-area"><div className="boundary" ref={boundaryRef}><canvas ref={canvasRef} className="artboard" style={{ width: metrics.width, height: metrics.height }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => setDrag(null)} /></div><p className="boundary-note">BOUNDARY 50 × 50 · 實際構圖 {columns} × {rows}</p></section><aside className="inspector"><div className="titlebar"><span className="window-dot red" /><span className="window-dot yellow" /><span className="window-dot green" /><strong>De Stijl Studio</strong></div><p className="eyebrow">{sourceLabel} · SEED {seed.toString().padStart(6, "0")}</p><section><h1>構圖控制</h1><label>寬度 <output>{columns}</output><input type="range" min="5" max="50" value={columns} onChange={(event) => changeColumns(Number(event.target.value))} /></label><label>高度 <output>{rows}</output><input type="range" min="5" max="50" value={rows} onChange={(event) => changeRows(Number(event.target.value))} /></label><label>格線 <output>{lineWidth}px</output><input type="range" min="1" max="8" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} /></label></section><section><h2>色彩配額 <span>100%</span></h2>{(Object.keys(PALETTE) as Colour[]).map((name) => <label className="colour" key={name}><i style={{ background: PALETTE[name].hex }} />{PALETTE[name].label}<output>{colourRatios[name]}%</output><input type="range" min="0" max="100" value={colourRatios[name]} onChange={(event) => { const next = balance(colourRatios, name, Number(event.target.value)); setColourRatios(next); rebuild(seed, profile, rows, columns, next); }} /></label>)}</section><section><h2>方格階數配額 <span>100%</span></h2><label>最大階數 <output>{maxTier}</output><input type="range" min="1" max="8" value={maxTier} onChange={(event) => changeMatrixSize(Number(event.target.value))} /></label>{Array.from({ length: maxTier }, (_, index) => index + 1).map((tier) => <label className="tier" key={tier}>{tier} 階矩陣 <output>{sizeRatios[tier]}%</output><input type="range" min="0" max="100" value={sizeRatios[tier]} onChange={(event) => { const next = balance(sizeRatios, tier, Number(event.target.value)); setSizeRatios(next); rebuild(seed, profile, rows, columns, colourRatios, next); }} /></label>)}</section><section className="source"><h2>編碼輸入</h2><textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="輸入文字，轉為矩陣…" /><button onClick={encodeText}>轉譯文字矩陣</button><label className="upload">上傳圖片並取樣<input type="file" accept="image/*" onChange={uploadImage} /></label></section><div className="actions"><button className="secondary" onClick={() => { setProfile(undefined); setSourceLabel("純 Seed 生成"); rebuild(); }}>重新生成</button><button className="primary" onClick={exportPng}>匯出 PNG</button></div><p className="hint">拖曳色塊時，系統優先以來源位置與拖曳路徑交換既有方塊；不能安置的部分才會由動態規劃補滿。</p></aside></main>;
+  return <main className="editor"><section className="canvas-area"><div className="boundary" ref={boundaryRef}><canvas ref={canvasRef} className="artboard" style={{ width: metrics.width, height: metrics.height }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => setDrag(null)} /><button className="canvas-regenerate" aria-label="重新生成構圖" onClick={() => rebuild()}>↻ <span>重新生成</span></button></div><p className="boundary-note">BOUNDARY 50 × 50 · 實際構圖 {columns} × {rows}</p></section><aside className="inspector"><div className="titlebar"><span className="window-dot red" /><span className="window-dot yellow" /><span className="window-dot green" /><strong>De Stijl Studio</strong></div><p className="eyebrow">{sourceLabel} · SEED {seed.toString().padStart(6, "0")}</p><section><h1>構圖控制</h1><label>寬度 <output>{columns}</output><input type="range" min="5" max="50" value={columns} onChange={(event) => changeColumns(Number(event.target.value))} /></label><label>高度 <output>{rows}</output><input type="range" min="5" max="50" value={rows} onChange={(event) => changeRows(Number(event.target.value))} /></label><label>格線 <output>{lineWidth}px</output><input type="range" min="1" max="8" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} /></label></section><section><h2>色彩配額 <span>100%</span></h2>{(Object.keys(PALETTE) as Colour[]).map((name) => <label className="colour" key={name}><i style={{ background: PALETTE[name].hex }} />{PALETTE[name].label}<output>{colourRatios[name]}%</output><input type="range" min="0" max="100" value={colourRatios[name]} onChange={(event) => { const next = balance(colourRatios, name, Number(event.target.value)); setColourRatios(next); rebuild(seed, profile, rows, columns, next); }} /></label>)}</section><section><h2>方格階數配額 <span>100%</span></h2><label>最大階數 <output>{maxTier}</output><input type="range" min="1" max="8" value={maxTier} onChange={(event) => changeMatrixSize(Number(event.target.value))} /></label>{Array.from({ length: maxTier }, (_, index) => index + 1).map((tier) => <label className="tier" key={tier}>{tier} 階矩陣 <output>{sizeRatios[tier]}%</output><input type="range" min="0" max="100" value={sizeRatios[tier]} onChange={(event) => { const next = balance(sizeRatios, tier, Number(event.target.value)); setSizeRatios(next); rebuild(seed, profile, rows, columns, colourRatios, next); }} /></label>)}</section><section className="source"><h2>編碼輸入</h2><textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="輸入文字，轉為矩陣…" /><button onClick={encodeText}>轉譯文字矩陣</button><label className="upload">上傳圖片並取樣<input type="file" accept="image/*" onChange={uploadImage} /></label></section><div className="actions"><button className="secondary" onClick={() => { setProfile(undefined); setSourceLabel("純 Seed 生成"); rebuild(); }}>重新生成</button><button className="primary" onClick={exportPng}>匯出 PNG</button></div><p className="hint">拖曳色塊時，系統優先以來源位置與拖曳路徑交換既有方塊；不能安置的部分才會由動態規劃補滿。</p></aside></main>;
 }
