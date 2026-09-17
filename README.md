@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# De Stijl Studio
 
-## Getting Started
+> 將風格派的格線、原色與比例，轉譯為可探索、可重現、可輸出的生成式設計工具。
 
-First, run the development server:
+## 操作方式
+
+調整欄列、黑線粗細與五種色彩比例，按「產生新構圖」探索變體。每張作品都附有六位數 Seed，可回溯同一組結果，並可匯出為 1800px PNG。
+
+## 設計與技術亮點
+
+- **比例守恆**：調整一種色彩時，系統自動平衡其他比例，總和固定為 100%。
+- **可重現的偶然**：以 seeded pseudo-random generator 保存探索過程中的作品版本。
+- **構圖演算法**：先配置主要矩形、再以方向性長條填滿，分色時兼顧配額與相鄰色彩排斥。
+- **響應式操作介面**：桌面採雙欄工作區，行動裝置改為直式閱讀與操作流程。
+
+## 本機執行
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+在瀏覽器開啟 `http://localhost:3000`。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 專案結構
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```text
+app/
+├── layout.tsx                  # 網站語言與作品集 SEO 資訊
+├── page.tsx                    # 首頁入口
+└── globals.css                 # 視覺系統與響應式版面
+src/components/
+└── DeStijlGenerator.tsx        # 演算法、Canvas 繪製、完整互動控制
+```
 
-## Learn More
+## 研究所推甄作品摘要
 
-To learn more about Next.js, take a look at the following resources:
+詳見 [PORTFOLIO.md](PORTFOLIO.md)。本專案由 Kent Chen 完成，聚焦於創意程式設計、參數化視覺系統與互動式生成設計。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 授權
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT License。
