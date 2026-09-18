@@ -1,4 +1,4 @@
-import DeStijlGenerator from '../src/components/DeStijlGenerator';
+import DeStijlGenerator from '../components/DeStijlGenerator';
 
 export default function Home() {
   return (
