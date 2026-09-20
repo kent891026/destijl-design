@@ -397,7 +397,7 @@ npm run dev
 
 開啟 `http://localhost:3000` 後即可開始使用。
 
-或是使用我部署好的網站ㄏ
+或是使用我部署好的網站：[De Stijl Studio](https\://destijl-design.vercel.app/)
 
 ### 品質檢查
 
